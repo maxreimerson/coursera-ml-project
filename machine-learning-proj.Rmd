@@ -4,32 +4,206 @@ author: "Max Reimerson"
 date: "3 June, 2017"
 output: html_document
 ---
-
-This report looks at the data from training measurements using devices like Fitbit etc. The aim is to use the data from the fitbit to predict the what type of excecise is performend and how well it was done. All the different excecises are encoded as A,B,C... etc, and here I build a model to predict them given the input data.
-
-Start by loading libraries and (cartet for the machine learning models and doMC for parallel processing). 
-```{r}
+```{r, include=FALSE}
 library(caret)
 library(doMC)
 
-validation <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
-training.full <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+# Use 3 out of 4 cores
+registerDoMC(3)
+```
 
+# Executive summary
+This report looks at the data from training measurements using devices like Fitbit etc. The aim is to use the data from the fitbit to predict the what type of excecise is performend and how well it was done. All the different excecises are encoded as A,B,C... etc, and here I build a model to predict them given the input data.
+
+# Exploratory analysis
+```{r, results="hide"}
+training.full <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+```
+
+```{r, echo=TRUE}
 dim(training.full)
 ```
 
-
-```{r}
+## Data cleanup and pre-processing
+There are 160 columns worth of data which makes it difficult to work with. The data is structured into windows of observation and each window starts with a summarization of the other observations. Since we don't have the whole window in the out of sample data the window information and the summarization is not useful. So first I will filter out all the summary rows:
+```{r, results="hide"}
 # Filter out new_window = 'yes' because it seems to be some summary row and it doesn't exist in the validation set so we can't use this anyway
 training.flt <- training.full[training.full$new_window == 'no',]
+```
+Secondly, most of the columns are summarizing statistics about the window, which will only be populated for the summarization row. 
+
+Here is what the 20 first columns look like. Most of them are empty:
+```{r, echo=FALSE}
+head(training.flt[,1:20],n=3)
+```
+
+So we can remove all these columns.
+```{r, results="hide"}
 # Because we filtered out all summary rows the stats columns are now only NA, so remove those
 training.flt <- training.flt[,-grep("^avg|skewness|max|kurtosis|min|stddev|var|amplitude", colnames(training.flt))]
 ```
 
-You can also embed plots, for example:
+Because we're not using the "window" anymore the new_window variable is now redudundant. The timestamps, X and window_num as only sequential variables,  which will have a high correlation with the outcome because the outcome is done in sequence, you can see the plot. 
 
 ```{r, echo=FALSE}
-plot(cars)
+qplot(data=training.flt, x=X, y=classe)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+This will mess up prediction as its not reasonable to expect this in an out of sample dataset
+
+Also to make the analysis meaningful we want to exclude the use who does this as that won't scale if the model needs to be fitted for each user
+
+```{r, results="hide"}
+training.clean <- training.flt[,-grep("X|window|timestamp|user_name", colnames(training.flt))]
+```
+
+Now we have a clean dataset to perform predictions on, which only has nummeric inputs and the outcome variable "classe"
+
+```{r, echo=TRUE}
+dim(training.clean)
+head(training.clean, n=3)
+```
+
+## Cross validation
+Divide the dataset up into a training, testing and validation dataset so that we can do cross validation.
+60% for training data
+15% for testing to determine the best model
+25% for validation - used to estimate the out of sample error
+```{r, results="hide"}
+inTrain <- createDataPartition(training.clean$classe, p = 0.60, list = FALSE)
+
+training <- training.clean[inTrain,]
+
+testing.all <- training.clean[-inTrain,]
+inValidation <- createDataPartition(testing.all$classe, p = 0.625, list = FALSE)
+
+testing <- testing.all[-inValidation,]
+testing.validation <- testing.all[inValidation,]
+
+## Also define a function for testing the models
+testModel <-function(mod) {
+  confusionMatrix(table(testing$classe, predict(mod, newdata = testing)))  
+}
+
+validateModel <-function(mod) {
+  confusionMatrix(table(testing.validation$classe, predict(mod, newdata = testing.validation)))  
+}
+```
+
+## Pre processing
+
+The next thing to do is to try princinple component analysis to reduce the number of variables.
+
+```{r, results="hide"}
+testing.x <- testing[-ncol(testing)]
+training.x <- training[-ncol(training)]
+# PCA
+training.pr <- prcomp(training.x)
+# Get the components for 95 % of the variance
+preProc.pca <- preProcess(training.x, method="pca", thresh = .95)
+trainPC <- predict(preProc.pca, training.x)
+trainPC$classe <- training$classe
+```
+Now we have a smaller set of variables explaining 95% of the variance in the original dataset
+```{r}
+dim(trainPC)
+```
+
+# Model selection
+
+Because I try to evaluate a multi-class prediction I can't use linear models or even any models based on binomial outcomes like glm or adaboost as these expects only 2 classes.
+
+I will mainly stick to tree based models.
+
+## Prediction trees
+Now first try to predict the outcome using a prediction tree
+
+```{r, results="hide"}
+set.seed(12345)
+model.rpart <- train(classe ~ ., data=training,method="rpart")
+```
+```{r}
+testModel(model.rpart)
+```
+
+Pretty low accuracy, we should be able to do better.
+
+Also define another testing function that applies the princinple components from the trainingset to the testing data and evaluates models based on that
+
+```{r, results="hide"}
+testModel.pca <-function(mod, preProc.pca) {
+  testPC <- predict(preProc.pca, testing.x)
+  confusionMatrix(table(testing$classe, predict(mod, newdata = testPC)))  
+}
+```
+
+First try a normal prediction tree based on the princinple components
+```{r, results="hide"}
+set.seed(12345)
+model.pca.rpart <- train(classe ~ .,method="rpart", data=trainPC)
+```
+```{r}
+testModel.pca(model.pca.rpart, preProc.pca)
+```
+
+Accuracy is even worse.
+
+## Bagging 
+Next thing to try is a bagged model, I use a bagged tree.
+
+```{r, results="hide"}
+set.seed(12345)
+model.pca.treebag <- train(classe ~ .,method="treebag", data=trainPC)
+```
+```{r}
+testModel.pca(model.pca.treebag, preProc.pca)
+```
+
+Accuracy is a lot better. Let's try it without the principal components.
+
+```{r, results="hide"}
+set.seed(12345)
+
+model.treebag <- train(classe ~ ., data=training,method="treebag")
+```
+```{r}
+testModel(model.treebag)
+```
+
+Accuracy is pretty good.
+
+## Boosting
+Try gradient boosting.
+```{r, results="hide"}
+set.seed(12345)
+
+model.gbm <- train(classe ~ ., data=training,method="gbm")
+```
+```{r}
+testModel(model.gbm)
+```
+
+Accuracy is pretty good, but not as good as the bagged tree.
+
+## Random Forest
+Finally try a random forest.
+```{r, results="hide"}
+set.seed(12345)
+model.rf <- train(classe ~ ., data=training,method="rf")
+```
+```{r}
+testModel(model.rf)
+```
+
+This is pretty good, best so far.
+
+# Conclusion
+So the random forest model perform the best on this data.
+
+Now estimate the out of sample error using the validation dataset
+```{r}
+c <- validateModel(model.rf)
+c 
+```
+
+So the expected out of sample accuracy is `r round(c$overall[1], 3) ` with a 95% confidence interval of `r round(c$overall[3], 3) `
