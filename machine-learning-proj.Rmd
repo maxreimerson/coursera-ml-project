@@ -1,0 +1,35 @@
+---
+title: "Machine learning project"
+author: "Max Reimerson"
+date: "3 June, 2017"
+output: html_document
+---
+
+This report looks at the data from training measurements using devices like Fitbit etc. The aim is to use the data from the fitbit to predict the what type of excecise is performend and how well it was done. All the different excecises are encoded as A,B,C... etc, and here I build a model to predict them given the input data.
+
+Start by loading libraries and (cartet for the machine learning models and doMC for parallel processing). 
+```{r}
+library(caret)
+library(doMC)
+
+validation <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+training.full <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+
+dim(training.full)
+```
+
+
+```{r}
+# Filter out new_window = 'yes' because it seems to be some summary row and it doesn't exist in the validation set so we can't use this anyway
+training.flt <- training.full[training.full$new_window == 'no',]
+# Because we filtered out all summary rows the stats columns are now only NA, so remove those
+training.flt <- training.flt[,-grep("^avg|skewness|max|kurtosis|min|stddev|var|amplitude", colnames(training.flt))]
+```
+
+You can also embed plots, for example:
+
+```{r, echo=FALSE}
+plot(cars)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
